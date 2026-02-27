@@ -1,6 +1,6 @@
-curl -fsSL https://raw.githubusercontent.com/dexterbot80/proxmox/main/proxmox-debian13-openhab-lxc.sh \
-| CTID=110 HOSTNAME=openhab STORAGE=local-lvm BRIDGE=vmbr0 \
-  IP_CIDR="192.168.1.232/24" GATEWAY="192.168.1.1" DNS="1.1.1.1 8.8.8.8" \
-  CT_PASSWORD="SchimbaAceastaParolaRoot" \
-  OS_USER="openhabian" OS_PASS="openhabian" \
-  bash
+curl -fsSLo /tmp/proxmox-openhab.sh https://raw.githubusercontent.com/dexterbot80/proxmox/main/proxmox-openhab-debian13-lxc.sh && \
+CTID=110 HOSTNAME=openhab STORAGE=local-lvm BRIDGE=vmbr0 \
+IP_CIDR="192.168.1.232/24" GATEWAY="192.168.1.1" DNS="1.1.1.1 8.8.8.8" \
+CT_PASSWORD="SchimbaAceastaParolaRoot" \
+OS_USER="openhabian" OS_PASS="openhabian" \
+bash /tmp/proxmox-openhab.sh
