@@ -4,10 +4,10 @@ set -euo pipefail
 # ==========================================================
 # openHABian LXC (amd64) for Proxmox - fully automated
 # - Static IP: 192.168.1.232/24 (openHAB on :8080)
-# - Hostname forced to: OpenHabian (GUI will show: 150 (OpenHabian))
+# - Hostname forced: OpenHabian
 # - Passwords: openhabian (user + root)
-# - Java 21 JDK: OFFICIAL Eclipse Adoptium/Temurin tar.gz (no apt repo)
-# - Fix for systemd/openhab status=127: JAVA_HOME/PATH drop-in override
+# - Java 21 JDK: OFFICIAL Eclipse Adoptium/Temurin tar.gz
+# - Fix libjli.so: ldconfig + systemd env
 # ==========================================================
 
 # =======================
@@ -22,20 +22,17 @@ MEMORY="${MEMORY:-4096}"          # MB
 DISK_SIZE="${DISK_SIZE:-16}"      # GB
 BRIDGE="${BRIDGE:-vmbr0}"
 
-# Static IP requested
 IP_CIDR="${IP_CIDR:-192.168.1.232/24}"
 GATEWAY="${GATEWAY:-192.168.1.1}"
 DNS1="${DNS1:-1.1.1.1}"
 DNS2="${DNS2:-8.8.8.8}"
 
-TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"  # where templates live (usually local)
+TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"  # templates usually on local
 ROOTFS_STORAGE="${ROOTFS_STORAGE:-}"           # auto: local-zfs -> local
 UNPRIVILEGED="${UNPRIVILEGED:-1}"
 NESTING="${NESTING:-1}"
 
-# 0 = like screenshot (banner + prompt)
-# 1 = auto run openhabian-config on tty1 after login
-AUTO_OPENHABIAN_CONFIG="${AUTO_OPENHABIAN_CONFIG:-0}"
+AUTO_OPENHABIAN_CONFIG="${AUTO_OPENHABIAN_CONFIG:-0}"  # 0=normal, 1=auto openhabian-config on tty1
 
 # =======================
 # Helpers
@@ -125,7 +122,6 @@ pct exec "$CTID" -- bash -lc "
 set -e
 echo '$HOSTNAME' > /etc/hostname
 hostname '$HOSTNAME' || true
-# ensure /etc/hosts has 127.0.1.1 mapping
 if grep -q '^127.0.1.1' /etc/hosts; then
   sed -i 's/^127.0.1.1.*/127.0.1.1\t$HOSTNAME/' /etc/hosts
 else
@@ -145,7 +141,7 @@ printf '%s ALL=(ALL) NOPASSWD:ALL\n' openhabian > /etc/sudoers.d/90-openhabian
 chmod 440 /etc/sudoers.d/90-openhabian
 "
 
-echo "[8/12] Installing Java 21 JDK (OFFICIAL Eclipse Adoptium/Temurin tar.gz)..."
+echo "[8/12] Installing Java 21 JDK (OFFICIAL Eclipse Adoptium/Temurin tar.gz) + fixing libjli.so..."
 pct exec "$CTID" -- bash -lc "
 set -e
 mkdir -p /opt/java
@@ -157,6 +153,7 @@ if [ \"\$ARCH\" != \"amd64\" ]; then
   exit 1
 fi
 
+# Download official Temurin 21 GA JDK tar.gz
 JDK_URL='https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse'
 wget -O temurin21.tar.gz \"\$JDK_URL\"
 tar -xzf temurin21.tar.gz
@@ -168,32 +165,43 @@ if [ -z \"\$JDK_DIR\" ]; then
   exit 1
 fi
 
+# Ensure libjli.so is discoverable by the dynamic linker (fix: /usr/bin/java error libjli.so)
+if [ -f \"\$JDK_DIR/lib/libjli.so\" ]; then
+  echo \"\$JDK_DIR/lib\" > /etc/ld.so.conf.d/temurin21.conf
+  ldconfig
+else
+  echo 'WARNING: libjli.so not found at expected path; will rely on LD_LIBRARY_PATH for openHAB.'
+fi
+
+# Register system-wide alternatives
 update-alternatives --install /usr/bin/java  java  \"\$JDK_DIR/bin/java\"  2100
 update-alternatives --install /usr/bin/javac javac \"\$JDK_DIR/bin/javac\" 2100
 update-alternatives --set java  \"\$JDK_DIR/bin/java\"
 update-alternatives --set javac \"\$JDK_DIR/bin/javac\"
 
+# Shell profile (interactive)
 cat > /etc/profile.d/java.sh <<EOF
 export JAVA_HOME=\$JDK_DIR
 export PATH=\\\$JAVA_HOME/bin:\\\$PATH
 EOF
 chmod +x /etc/profile.d/java.sh
 
-. /etc/profile.d/java.sh
 java -version
 "
 
-echo "[9/12] Wiring Java 21 into systemd for openHAB (fix status=127)..."
+echo "[9/12] Wiring Java 21 into systemd for openHAB (fix status=127) ..."
 pct exec "$CTID" -- bash -lc '
 set -e
 JDK_DIR="$(ls -d /opt/java/jdk-21* 2>/dev/null | head -n1)"
 [ -n "$JDK_DIR" ] || { echo "ERROR: JDK_DIR not found"; exit 1; }
 
+# openHAB needs Java + libjli.so available in service environment too
 mkdir -p /etc/systemd/system/openhab.service.d
 cat > /etc/systemd/system/openhab.service.d/override.conf <<EOF
 [Service]
 Environment="JAVA_HOME=${JDK_DIR}"
 Environment="PATH=${JDK_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="LD_LIBRARY_PATH=${JDK_DIR}/lib:${JDK_DIR}/lib/server"
 EOF
 
 systemctl daemon-reload
