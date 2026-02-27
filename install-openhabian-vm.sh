@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-### ====== CONFIG (poți suprascrie prin env la rulare) ======
+### ====== CONFIG (suprascrii cu env la rulare) ======
 VMID="${VMID:-120}"
-VMNAME="${VMNAME:-openhabian}"
-STORAGE="${STORAGE:-local-lvm}"     # ex: local-lvm, local, zfs, etc.
+VMNAME="${VMNAME:-OpenHabian}"      # hostname + nume VM; ca să apară "OpenHabian login:"
+STORAGE="${STORAGE:-local-lvm}"     # ex: local-lvm, local, zfs
 BRIDGE="${BRIDGE:-vmbr0}"
 CORES="${CORES:-2}"
 RAM_MB="${RAM_MB:-4096}"
 DISK_GB="${DISK_GB:-32}"
 VLAN_TAG="${VLAN_TAG:-}"           # ex: 20 (gol = fără VLAN)
 
-# User/parola implicită cerută:
+# user/parola implicite (cum ai cerut)
 CIUSER="${CIUSER:-openhabian}"
 CIPASS="${CIPASS:-openhabian}"
 
@@ -28,9 +28,9 @@ CLONEBRANCH="${CLONEBRANCH:-}"
 IMG_URL="${IMG_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2}"
 IMG_NAME="${IMG_NAME:-debian-12-genericcloud-amd64.qcow2}"
 
-# openHABian setup script
+# openHABian setup script (oficial)
 OPENHABIAN_SETUP_URL="${OPENHABIAN_SETUP_URL:-https://raw.githubusercontent.com/openhab/openhabian/main/openhabian-setup.sh}"
-### =========================================================
+### ===================================================
 
 require() { command -v "$1" >/dev/null 2>&1 || { echo "Lipsește comanda: $1"; exit 1; }; }
 
@@ -46,9 +46,8 @@ if qm status "$VMID" >/dev/null 2>&1; then
   exit 1
 fi
 
-# IMPORTANT:
-# Pentru `--cicustom user=local:snippets/...` trebuie ca storage-ul `local`
-# să aibă bifat Content: "Snippets".
+# Pentru cicustom user=local:snippets/... trebuie ca storage-ul "local"
+# să aibă bifat Content: "Snippets" în Proxmox GUI.
 SNIPPETS_DIR="/var/lib/vz/snippets"
 mkdir -p "$SNIPPETS_DIR"
 
@@ -57,14 +56,14 @@ mkdir -p "$WORKDIR"
 
 IMG="$WORKDIR/$IMG_NAME"
 
-echo "[1/9] Descarc imaginea Debian cloud (amd64)..."
+echo "[1/8] Descarc imaginea Debian cloud (amd64)..."
 if [[ ! -f "$IMG" ]]; then
   wget -O "$IMG" "$IMG_URL"
 else
   echo " - Imagine deja existentă: $IMG"
 fi
 
-echo "[2/9] Generez cloud-init user-data (openHABian unattended + autostart console)..."
+echo "[2/8] Generez cloud-init user-data (openHABian unattended + tty1 login -> openhabian-config)..."
 USERDATA="$SNIPPETS_DIR/${VMNAME}-userdata.yaml"
 META="$SNIPPETS_DIR/${VMNAME}-meta.yaml"
 
@@ -122,6 +121,9 @@ runcmd:
   # agent
   - [ bash, -lc, "systemctl enable --now qemu-guest-agent || true" ]
 
+  # hostname persistent (ca să vezi 'OpenHabian login:')
+  - [ bash, -lc, "hostnamectl set-hostname ${VMNAME}" ]
+
   # openhabian.conf
   - [ bash, -lc, "echo '${CONF_B64}' | base64 -d > /etc/openhabian.conf" ]
   - [ bash, -lc, "chmod 0644 /etc/openhabian.conf" ]
@@ -132,21 +134,10 @@ runcmd:
   - [ bash, -lc, "chmod +x /opt/openhabian/openhabian-setup.sh" ]
   - [ bash, -lc, "/opt/openhabian/openhabian-setup.sh unattended" ]
 
-  # === OBLIGATORIU: Pornește consola openHAB la boot pe tty1 (consola Proxmox) ===
-
-  # script care așteaptă până când openHAB e gata și intră în console (cu retry)
-  - [ bash, -lc, "cat > /usr/local/bin/start-openhab-console.sh << 'EOS'\n#!/usr/bin/env bash\nset -euo pipefail\n\n# așteaptă să existe comanda openhab-cli\nfor i in {1..120}; do\n  if command -v openhab-cli >/dev/null 2>&1; then\n    break\n  fi\n  sleep 5\ndone\n\n# așteaptă să fie activ serviciul openhab (dacă există)\nif systemctl list-unit-files | grep -q '^openhab\\.service'; then\n  systemctl start openhab || true\n  for i in {1..120}; do\n    if systemctl is-active --quiet openhab; then\n      break\n    fi\n    sleep 5\n  done\nfi\n\n# intră în consola openHAB; dacă iese, reîncearcă\nwhile true; do\n  if command -v openhab-cli >/dev/null 2>&1; then\n    exec openhab-cli console\n  fi\n  sleep 5\ndone\nEOS" ]
-  - [ bash, -lc, "chmod +x /usr/local/bin/start-openhab-console.sh" ]
-
-  # pornește consola automat la login (TTY) pentru user
-  - [ bash, -lc, "grep -q 'start-openhab-console' /home/${CIUSER}/.bash_profile 2>/dev/null || echo '/usr/local/bin/start-openhab-console.sh' >> /home/${CIUSER}/.bash_profile" ]
-  - [ bash, -lc, "chown ${CIUSER}:${CIUSER} /home/${CIUSER}/.bash_profile" ]
-
-  # autologin pe tty1 (consola Proxmox) cu getty override
-  - [ bash, -lc, "mkdir -p /etc/systemd/system/getty@tty1.service.d" ]
-  - [ bash, -lc, "cat > /etc/systemd/system/getty@tty1.service.d/override.conf << 'EOT'\n[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin ${CIUSER} --noclear %I \\$TERM\nType=idle\nEOT" ]
-  - [ bash, -lc, "systemctl daemon-reload" ]
-  - [ bash, -lc, "systemctl restart getty@tty1.service || true" ]
+  # === LOGIN PROMPT pe tty1 + AUTO openhabian-config DUPĂ login ===
+  # rulează doar în shell interactiv și doar pe /dev/tty1 (Proxmox Console)
+  - [ bash, -lc, "cat > /etc/profile.d/openhabian-tty1.sh << 'EOS'\n#!/usr/bin/env bash\n# doar shell interactiv\ncase $- in *i*) ;; *) return ;; esac\n# doar consola locală tty1\n[ \"$(tty)\" = \"/dev/tty1\" ] || return\n# evită loop dacă se deschide subshell\n[ -n \"${OPENHABIAN_TTY1_STARTED:-}\" ] && return\nexport OPENHABIAN_TTY1_STARTED=1\n\n# pornește openhabian-config dacă există\nif command -v openhabian-config >/dev/null 2>&1; then\n  exec openhabian-config\nfi\nEOS" ]
+  - [ bash, -lc, "chmod +x /etc/profile.d/openhabian-tty1.sh" ]
 EOF
 
 cat > "$META" <<EOF
@@ -154,7 +145,7 @@ instance-id: ${VMNAME}-${VMID}
 local-hostname: ${VMNAME}
 EOF
 
-echo "[3/9] Creez VM-ul..."
+echo "[3/8] Creez VM-ul..."
 qm create "$VMID" \
   --name "$VMNAME" \
   --ostype l26 \
@@ -168,16 +159,17 @@ qm create "$VMID" \
   --serial0 socket \
   --vga serial0
 
-echo "[4/9] Import disk și atașez..."
+echo "[4/8] Import disk și atașez..."
 qm importdisk "$VMID" "$IMG" "$STORAGE" --format qcow2
 qm set "$VMID" --scsi0 "${STORAGE}:vm-${VMID}-disk-0,discard=on,ssd=1"
 
-echo "[5/9] Network + Cloud-Init..."
+echo "[5/8] Network + Cloud-Init..."
 NETCFG="virtio,bridge=${BRIDGE}"
 if [[ -n "$VLAN_TAG" ]]; then
   NETCFG="${NETCFG},tag=${VLAN_TAG}"
 fi
 qm set "$VMID" --net0 "$NETCFG"
+
 qm set "$VMID" --ide2 "${STORAGE}:cloudinit"
 qm set "$VMID" --boot order=scsi0
 
@@ -185,18 +177,17 @@ qm set "$VMID" --cicustom "user=local:snippets/$(basename "$USERDATA"),meta=loca
 qm set "$VMID" --ciuser "$CIUSER" --cipassword "$CIPASS"
 qm set "$VMID" --ipconfig0 "$IPCONFIG"
 
-echo "[6/9] Resize disk la ${DISK_GB}G..."
+echo "[6/8] Resize disk la ${DISK_GB}G..."
 qm resize "$VMID" scsi0 "${DISK_GB}G"
 
-echo "[7/9] Pornesc VM..."
+echo "[7/8] Pornesc VM..."
 qm start "$VMID"
 
-echo "[8/9] Gata."
-echo "VMID: $VMID | Nume: $VMNAME | user/parola: ${CIUSER}/${CIPASS} | IP: $IPCONFIG"
 echo
-echo "[9/9] IMPORTANT:"
-echo " - Deschide Proxmox Console la VM -> vei intra automat și va porni openHAB CLI console."
-echo " - openHAB UI: http://<IP_VM>:8080"
+echo "[8/8] Gata."
+echo "VMID: $VMID | Nume/hostname: $VMNAME | user/parola: ${CIUSER}/${CIPASS} | IP: $IPCONFIG"
+echo "Proxmox Console (tty1): vei vedea prompt de login, iar după login pornește openhabian-config."
+echo "openHAB UI: http://<IP_VM>:8080"
 echo
-echo "Dacă nu vezi IP-ul imediat, după ce bootează agentul:"
+echo "IP (după boot, când agentul pornește):"
 echo "  qm guest cmd $VMID network-get-interfaces"
